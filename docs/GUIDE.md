@@ -51,17 +51,6 @@ Your app ──InitTransactionData──▶ PaymentClient
 
 ## 3. Installation
 
-In the root `composer.json`:
-
-```jsonc
-"require": {
-    "esanj/payment-client": "dev-main"
-},
-"repositories": [
-    { "type": "path", "url": "packages/esanj/ms-package-payment", "options": { "symlink": true } }
-]
-```
-
 ```bash
 composer update esanj/payment-client
 ```

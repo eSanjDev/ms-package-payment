@@ -4,19 +4,6 @@ A Laravel client package for the **Esanj Payment Microservice**. It authenticate
 
 ## Installation
 
-The package lives in this monorepo and is wired up as a path repository. Add it to the root `composer.json`:
-
-```jsonc
-"require": {
-    "esanj/payment-client": "dev-main"
-},
-"repositories": [
-    { "type": "path", "url": "packages/esanj/ms-package-payment", "options": { "symlink": true } }
-]
-```
-
-Then:
-
 ```bash
 composer update esanj/payment-client
 ```
