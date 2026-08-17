@@ -16,10 +16,12 @@ class AuthBridgeTokenProvider implements TokenProviderInterface
 {
     public function __construct(
         private readonly ClientCredentialsServiceInterface $credentials,
-        private readonly string $clientId,
-        private readonly string $clientSecret,
-        private readonly ?string $scope = null,
-    ) {}
+        private readonly string                            $clientId,
+        private readonly string                            $clientSecret,
+        private readonly ?string                           $scope = null,
+    )
+    {
+    }
 
     public function authorizationHeader(): string
     {
@@ -40,7 +42,7 @@ class AuthBridgeTokenProvider implements TokenProviderInterface
     public function invalidate(): void
     {
         if ($this->clientId !== '') {
-            $this->credentials->invalidateToken($this->clientId, $this->scope);
+            $this->credentials->invalidateToken($this->clientId, $this->clientSecret, $this->scope);
         }
     }
 
