@@ -18,31 +18,34 @@ class PaymentClientServiceProvider extends ServiceProvider
         $this->mergeConfigFrom(__DIR__ . '/../config/payment.php', 'esanj.payment');
 
         $this->app->singleton(TokenProviderInterface::class, function ($app) {
-            $config = $app['config']['esanj']['payment'];
+            $config = $app['config'];
 
             return new AuthBridgeTokenProvider(
                 credentials:  $app->make(ClientCredentialsServiceInterface::class),
-                clientId:     (string) $config['client_id'],
-                clientSecret: (string) $config['client_secret'],
-                scope:        $config['scope'] ?? null,
+                clientId:     (string) $config->get('esanj.payment.client_id'),
+                clientSecret: (string) $config->get('esanj.payment.client_secret'),
+                scope:        $config->get('esanj.payment.scope'),
             );
         });
 
         $this->app->singleton(PaymentClientInterface::class, function ($app) {
-            $config = $app['config']['esanj']['payment'];
+            $config = $app['config'];
 
-            $logChannel = $config['logging']['channel'] ?? null;
+            $logChannel = $config->get('esanj.payment.logging.channel');
             $logger = $logChannel
                 ? $app['log']->channel($logChannel)
                 : $app[LoggerInterface::class];
 
             $apiClient = new ApiClient(
-                httpClient:    new Client(['timeout' => $config['timeout'], 'connect_timeout' => 10]),
+                httpClient:    new Client([
+                    'timeout'         => (int) $config->get('esanj.payment.timeout', 30),
+                    'connect_timeout' => 10,
+                ]),
                 tokenProvider: $app[TokenProviderInterface::class],
                 logger:        $logger,
-                baseUrl:       $config['base_url'],
-                retryAttempts: max(1, (int) $config['retry']['attempts']),
-                retrySleepMs:  (int) $config['retry']['sleep_ms'],
+                baseUrl:       (string) $config->get('esanj.payment.base_url', 'http://localhost'),
+                retryAttempts: max(1, (int) $config->get('esanj.payment.retry.attempts', 3)),
+                retrySleepMs:  (int) $config->get('esanj.payment.retry.sleep_ms', 1000),
             );
 
             return new PaymentClient($apiClient);
