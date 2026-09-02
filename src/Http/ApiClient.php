@@ -5,6 +5,7 @@ namespace Esanj\PaymentClient\Http;
 use Esanj\PaymentClient\Contracts\TokenProviderInterface;
 use Esanj\PaymentClient\Exceptions\PaymentApiException;
 use GuzzleHttp\Client;
+use GuzzleHttp\Exception\BadResponseException;
 use GuzzleHttp\Exception\ClientException;
 use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Exception\GuzzleException;
@@ -13,130 +14,112 @@ use Psr\Log\LoggerInterface;
 
 class ApiClient
 {
-    private const TOKEN_INVALID_STATUSES = [401, 403];
-
     public function __construct(
-        private readonly Client $httpClient,
+        private readonly Client                 $httpClient,
         private readonly TokenProviderInterface $tokenProvider,
-        private readonly LoggerInterface $logger,
-        private readonly string $baseUrl,
-        private readonly int $retryAttempts,
-        private readonly int $retrySleepMs,
-    ) {}
+        private readonly LoggerInterface        $logger,
+        private readonly string                 $baseUrl,
+        private readonly int                    $retryAttempts,
+        private readonly int                    $retrySleepMs,
+    )
+    {
+    }
 
     public function get(string $path, array $query = []): array
     {
-        return $this->request('GET', $path, array_filter(['query' => $query ?: null]));
+        return $this->request('GET', $path, array_filter(['query' => $query ?: null]), idempotent: true);
     }
 
-    public function post(string $path, array $body = []): array
+    public function post(string $path, array $body = [], bool $idempotent = false): array
     {
-        return $this->request('POST', $path, ['json' => $body]);
+        return $this->request('POST', $path, ['json' => $body], $idempotent);
     }
 
-    private function request(string $method, string $path, array $options = []): array
+    private function request(string $method, string $path, array $options, bool $idempotent): array
     {
         $url = rtrim($this->baseUrl, '/') . '/' . ltrim($path, '/');
-        $lastException = null;
 
         for ($attempt = 1; $attempt <= $this->retryAttempts; $attempt++) {
             try {
                 $response = $this->httpClient->request($method, $url, array_merge($options, [
                     'headers' => [
                         'Authorization' => $this->tokenProvider->authorizationHeader(),
-                        'Accept'        => 'application/json',
+                        'Accept' => 'application/json',
                     ],
                 ]));
 
-                return json_decode($response->getBody()->getContents(), true) ?? [];
+                return $this->decode((string)$response->getBody());
 
             } catch (ClientException $e) {
-                $status = $e->getResponse()->getStatusCode();
-                $body   = json_decode($e->getResponse()->getBody()->getContents(), true) ?? [];
+                $exception = $this->makeApiException($e);
 
-                // Only auth failures are retryable; everything else is a definitive answer.
-                if (!in_array($status, self::TOKEN_INVALID_STATUSES, true) || $attempt >= $this->retryAttempts) {
-                    if (in_array($status, self::TOKEN_INVALID_STATUSES, true)) {
-                        $this->logger->error('[PaymentClient] Authentication failed after all retry attempts.', [
-                            'status' => $status,
-                            'url'    => $url,
-                        ]);
-                    }
-
-                    throw $this->makeApiException($body, $status, $e);
+                if ($exception->isUnauthorized()) {
+                    $this->tokenProvider->invalidate();
                 }
 
-                // Token was rejected — invalidate it and retry with a fresh one.
-                $this->logger->warning('[PaymentClient] Token rejected, refreshing and retrying.', [
-                    'status'  => $status,
-                    'attempt' => $attempt,
-                    'url'     => $url,
-                ]);
-
-                $this->tokenProvider->invalidate();
-                $lastException = $this->makeApiException($body, $status, $e);
-                $this->sleep();
+                $this->retryOrThrow($exception, $exception->isUnauthorized(), $attempt, 'Token rejected', $url);
 
             } catch (ServerException $e) {
-                $status = $e->getResponse()->getStatusCode();
-                $body   = json_decode($e->getResponse()->getBody()->getContents(), true) ?? [];
-
-                $this->logger->warning('[PaymentClient] Server error, retrying.', [
-                    'status'  => $status,
-                    'attempt' => $attempt,
-                    'url'     => $url,
-                ]);
-
-                $lastException = $this->makeApiException($body, $status, $e, 'server error');
-
-                if ($attempt < $this->retryAttempts) {
-                    $this->sleep();
-                }
+                $this->retryOrThrow($this->makeApiException($e), $idempotent, $attempt, 'Server error', $url);
 
             } catch (ConnectException $e) {
-                $this->logger->warning('[PaymentClient] Connection error, retrying.', [
-                    'attempt' => $attempt,
-                    'url'     => $url,
-                    'error'   => $e->getMessage(),
-                ]);
+                $exception = new PaymentApiException('Connection error: ' . $e->getMessage(), statusCode: 0, previous: $e);
 
-                $lastException = new PaymentApiException(
-                    'Connection error: ' . $e->getMessage(),
-                    statusCode: 0,
-                    previous: $e,
-                );
-
-                if ($attempt < $this->retryAttempts) {
-                    $this->sleep();
-                }
+                $this->retryOrThrow($exception, $idempotent, $attempt, 'Connection error', $url);
 
             } catch (GuzzleException $e) {
-                $this->logger->error('[PaymentClient] Unexpected HTTP error.', [
-                    'attempt' => $attempt,
-                    'url'     => $url,
-                    'error'   => $e->getMessage(),
-                ]);
+                $this->logger->error('[PaymentClient] Unexpected HTTP error.', ['url' => $url, 'error' => $e->getMessage()]);
 
                 throw new PaymentApiException('Unexpected error: ' . $e->getMessage(), statusCode: 0, previous: $e);
             }
         }
 
-        $this->logger->error('[PaymentClient] All retry attempts exhausted.', [
-            'url'      => $url,
-            'attempts' => $this->retryAttempts,
-        ]);
-
-        throw $lastException ?? new PaymentApiException('Request failed after all retry attempts.', statusCode: 0);
+        throw new PaymentApiException('Request failed after all retry attempts.', statusCode: 0);
     }
 
-    private function makeApiException(array $body, int $status, GuzzleException $previous, string $kind = 'error'): PaymentApiException
+    private function retryOrThrow(PaymentApiException $exception, bool $retryable, int $attempt, string $reason, string $url): void
     {
+        if (!$retryable || $attempt >= $this->retryAttempts) {
+            if ($retryable) {
+                $this->logger->error("[PaymentClient] {$reason}, giving up after {$attempt} attempts.", [
+                    'status' => $exception->statusCode,
+                    'url' => $url,
+                ]);
+            }
+
+            throw $exception;
+        }
+
+        $this->logger->warning("[PaymentClient] {$reason}, retrying.", [
+            'status' => $exception->statusCode,
+            'attempt' => $attempt,
+            'url' => $url,
+        ]);
+
+        $this->sleep();
+    }
+
+    private function makeApiException(BadResponseException $e): PaymentApiException
+    {
+        $response = $e->getResponse();
+        $status = $response->getStatusCode();
+        $body = $this->decode((string)$response->getBody());
+        $retryAfter = $response->getHeaderLine('Retry-After');
+
         return new PaymentApiException(
-            message: $body['message'] ?? "HTTP {$status} {$kind}.",
+            message: $body['message'] ?? "HTTP {$status} error.",
             statusCode: $status,
             responseBody: $body,
-            previous: $previous,
+            previous: $e,
+            retryAfter: is_numeric($retryAfter) ? (int)$retryAfter : null,
         );
+    }
+
+    private function decode(string $json): array
+    {
+        $data = json_decode($json, true);
+
+        return is_array($data) ? $data : [];
     }
 
     private function sleep(): void

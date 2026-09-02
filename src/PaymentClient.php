@@ -12,7 +12,9 @@ use Esanj\PaymentClient\Resources\TransactionStatusResource;
 
 class PaymentClient implements PaymentClientInterface
 {
-    public function __construct(private readonly ApiClient $apiClient) {}
+    public function __construct(protected ApiClient $apiClient)
+    {
+    }
 
     public function listGateways(): array
     {
@@ -30,7 +32,7 @@ class PaymentClient implements PaymentClientInterface
 
     public function status(string $code): TransactionStatusResource
     {
-        $response = $this->apiClient->post('api/v1/payment/status', ['code' => $code]);
+        $response = $this->apiClient->post('api/v1/payment/status', ['code' => $code], idempotent: true);
 
         return TransactionStatusResource::fromArray($response);
     }
