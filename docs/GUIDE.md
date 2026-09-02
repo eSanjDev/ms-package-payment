@@ -116,6 +116,10 @@ foreach (Payment::listGateways() as $gateway) {
 }
 ```
 
+`currencies` lists every currency the gateway can take a payment in, including ones the service
+converts on the way in (e.g. `IRT` on a rial-only gateway). The converted amount is what goes to
+the gateway; `status()` and the action results report the amount in the currency you requested.
+
 ## 7. Creating a transaction
 
 ```php
@@ -159,8 +163,10 @@ return redirect()->away($result->paymentPageUrl);
 
 **Server-side validation rules to keep in mind** (enforced by the Payment service):
 
-- `amount` — required, numeric, `1 .. 500000000000`, up to 2 decimals.
-- `currency` — required, must be one of the service's configured currencies (e.g. `IRR`, `IRT`).
+- `amount` — required, numeric, `1 .. 500000000000`, up to 2 decimals. For `IRR` / `IRT` it must
+  resolve to a whole number of rials: `IRT` amounts are multiplied by 10, so `1250.5` toman is
+  rejected while `1250.6` is not. Send rial amounts as integers.
+- `currency` — required, one of the service's configured currencies: `IRR`, `IRT`, `USD`, `CAD`.
 - `mobile` **or** `email` — at least one is required.
 - `gateway_key` — must exist and belong to the merchant (omit to use the default).
 - `return_url` — must be on one of the merchant's trusted domains.
@@ -169,11 +175,16 @@ return redirect()->away($result->paymentPageUrl);
 ## 8. The transaction lifecycle
 
 ```
-created / pending ──(customer pays)──▶ paid ──verify()──▶ verified ──settle()──▶ settled
-                                                              │
-                                                          revert()  ──▶ reverted (refund)
-cancel(): created | pending | settled ──▶ canceled
+created ──(redirect)──▶ pending ──(customer pays)──▶ paid ──verify()──▶ verified ──settle()──▶ settled
+   │                                                                        │                    │
+cancel()                                                                 revert()             cancel()
+   ▼                                                                        ▼                    ▼
+canceled                                                                 reverted             reverted
 ```
+
+- `pending` is the customer's time at the gateway: nothing can cancel or revert it, wait for the callback.
+- `revert()` only accepts `verified`. Once settled, the refund goes through `cancel()` — and the
+  resulting status is `reverted` (the refund may still be pending at the gateway), not `canceled`.
 
 ```php
 // Read current status
@@ -189,11 +200,34 @@ $status->status->isPaid();                 // typed checks
 Payment::verify($code);   // paid → verified   (must be paid, else PaymentApiException::isInvalidStatus())
 Payment::settle($code);   // verified → settled
 Payment::revert($code);   // verified → reverted (refund; issued to the gateway if it supports refunds)
-Payment::cancel($code);   // created | pending | settled → canceled
+Payment::cancel($code);   // created → canceled  |  settled → reverted (refund)
 ```
 
 The `TransactionStatus` enum offers `isPaid()`, `isVerified()`, `isSettled()`, `isPending()`,
 `isReverted()`, `isCanceled()`, `isFailed()`, and `isFinal()`.
+
+### Handling the return from the gateway
+
+After the customer pays (or gives up), the service redirects them to your `return_url` with
+`?status=<status>&code=<uuid>`. That query string passes through the customer's browser, so it
+is a hint, not a fact — always confirm with the service before fulfilling the order:
+
+```php
+use Esanj\PaymentClient\Facades\Payment;
+use Esanj\PaymentClient\Resources\PaymentCallback;
+
+public function callback(Request $request)
+{
+    $callback = PaymentCallback::fromRequest($request);   // ->code, ->status (null if tampered)
+
+    $transaction = Payment::status($callback->code);      // authoritative
+
+    if ($transaction->status->isPaid()) {
+        Payment::verify($callback->code);
+        // ... fulfil the order
+    }
+}
+```
 
 ## 9. Handling errors safely
 
@@ -212,8 +246,10 @@ try {
         // 503 — no gateway could serve this transaction
     } elseif ($e->isInvalidStatus()) {
         // 400 — action not allowed for the current transaction status
-    } elseif ($e->isNotFound()) {
-        // 404 — unknown transaction code
+    } elseif ($e->isForbidden()) {
+        // 403 — unknown transaction code, or it belongs to another merchant
+    } elseif ($e->isRateLimited()) {
+        // 429 — back off for $e->retryAfter seconds
     } else {
         report($e);                          // $e->statusCode, $e->responseBody
     }
@@ -223,10 +259,16 @@ try {
 }
 ```
 
-- `PaymentException` is the base class — catch it to handle everything at once.
-- Transient failures (HTTP 5xx, connection errors, and rejected tokens) are **retried
-  automatically** before an exception is thrown. On a rejected token the client invalidates the
-  cached token and fetches a fresh one on the next attempt.
+- `PaymentException` is the base class — catch it to handle everything at once. A response the
+  package cannot map (e.g. a status value it does not know) also surfaces as a `PaymentException`.
+- The service answers **403, not 404**, for an unknown transaction code — it does not reveal
+  whether a code exists. `isNotFound()` is only ever true for routing-level misses.
+- A rejected token (401) is invalidated and fetched afresh before a retry. Server (5xx) and
+  connection failures are retried **only for idempotent calls** — `listGateways()` and `status()`.
+  `initTransaction()`, `verify()`, `settle()`, `revert()` and `cancel()` are sent exactly once,
+  so a timeout can never create a second transaction or a second refund; catch the exception and
+  check `status()` before deciding to resend.
+- `429` is never retried; read `$e->retryAfter` and back off.
 
 ## 10. Configuration reference
 
@@ -265,5 +307,8 @@ and allowed-source checks on the service side.
 | `PaymentAuthenticationException: credentials are not configured` | `PAYMENT_CLIENT_ID` / `PAYMENT_CLIENT_SECRET` not set. |
 | `PaymentAuthenticationException` on every call | Wrong credentials, or `ACCOUNTING_BRIDGE_BASE_URL` points to the wrong OAuth server. |
 | `PaymentApiException` with 401 after retries | The JWT is rejected by the Payment service (clock skew, wrong signing key, wrong audience). |
+| `isForbidden()` (403) on every call | The merchant is inactive, or the caller's IP is outside the merchant's allowlist. |
+| `isForbidden()` (403) on one transaction | The code is unknown or was created by another merchant. |
+| `isRateLimited()` (429) | More than 120 calls/minute for this merchant; wait `$e->retryAfter` seconds. |
 | `isNoGatewayAvailable()` (503) | The merchant has no active gateway for the requested currency. |
 | `isValidationError()` (422) | Inspect `getErrors()` — usually `amount`, `currency`, `return_url`, or `cart_list`. |

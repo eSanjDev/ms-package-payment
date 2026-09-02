@@ -101,10 +101,27 @@ return redirect()->away($result->paymentPageUrl);   // $result->paymentToken hol
 $status = Payment::status($code);       // TransactionStatusResource
 $status->status->isPaid();              // typed TransactionStatus enum
 
-Payment::verify($code);   // paid   → verified
+Payment::verify($code);   // paid     → verified
 Payment::settle($code);   // verified → settled
 Payment::revert($code);   // verified → reverted (refund)
-Payment::cancel($code);   // created/pending/settled → canceled
+Payment::cancel($code);   // created  → canceled  |  settled → reverted (refund)
+```
+
+A transaction that is `pending` (the customer is at the gateway) can be neither canceled nor
+reverted — wait for the callback. Note that `cancel()` on a settled transaction refunds it and
+returns `status = reverted`, not `canceled`.
+
+### Handle the return from the gateway
+
+The service sends the customer back to your `return_url` with `?status=<status>&code=<uuid>`.
+Both values pass through the customer's browser, so read them as a hint and confirm with the service:
+
+```php
+use Esanj\PaymentClient\Resources\PaymentCallback;
+
+$callback = PaymentCallback::fromRequest($request);   // ->code, ->status (nullable)
+
+$status = Payment::status($callback->code)->status;   // the authoritative state
 ```
 
 ## Error Handling
@@ -124,7 +141,8 @@ try {
     $result = Payment::verify($code);
 } catch (PaymentApiException $e) {
     if ($e->isInvalidStatus())      { /* transaction not in a verifiable state */ }
-    elseif ($e->isNotFound())       { /* unknown code */ }
+    elseif ($e->isForbidden())      { /* unknown code, or it belongs to another merchant */ }
+    elseif ($e->isRateLimited())    { /* back off for $e->retryAfter seconds */ }
     elseif ($e->isValidationError()){ $errors = $e->getErrors(); }
     else                            { report($e); }
 } catch (PaymentAuthenticationException $e) {
@@ -132,8 +150,12 @@ try {
 }
 ```
 
-Server (5xx), connection and rejected-token (401/403) failures are retried automatically
-according to the `retry` config; a rejected token is invalidated and re-fetched before the retry.
+The service answers `403` — not `404` — for an unknown transaction code, so `isForbidden()` is
+the branch to handle it.
+
+A rejected token (401) is invalidated and re-fetched before a retry. Server (5xx) and connection
+failures are retried only for idempotent calls (`listGateways()`, `status()`); the actions that
+create or move money are sent once, so a timeout never turns into a duplicate transaction.
 
 ## API surface
 

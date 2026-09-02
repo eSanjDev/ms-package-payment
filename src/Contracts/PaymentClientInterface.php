@@ -28,22 +28,24 @@ interface PaymentClientInterface
     public function status(string $code): TransactionStatusResource;
 
     /**
-     * Verify a paid transaction.
+     * paid → verified. Any other state is rejected with a 400.
      */
     public function verify(string $code): TransactionActionResult;
 
     /**
-     * Settle a verified transaction.
+     * verified → settled. Any other state is rejected with a 400.
      */
     public function settle(string $code): TransactionActionResult;
 
     /**
-     * Revert (refund) a verified transaction.
+     * verified → reverted (refund). A settled transaction cannot be reverted
+     * here; use cancel() instead.
      */
     public function revert(string $code): TransactionActionResult;
 
     /**
-     * Cancel a transaction.
+     * created → canceled, or settled → reverted (refund). A transaction that is
+     * pending at the gateway cannot be canceled; wait for the callback.
      */
     public function cancel(string $code): TransactionActionResult;
 }
