@@ -14,6 +14,7 @@ class PaymentApiException extends PaymentException
         public readonly int $statusCode,
         public readonly array $responseBody = [],
         ?Throwable $previous = null,
+        public readonly ?int $retryAfter = null,
     ) {
         parent::__construct($message, $statusCode, $previous);
     }
@@ -46,6 +47,11 @@ class PaymentApiException extends PaymentException
     public function isValidationError(): bool
     {
         return $this->statusCode === 422;
+    }
+
+    public function isRateLimited(): bool
+    {
+        return $this->statusCode === 429;
     }
 
     /**
