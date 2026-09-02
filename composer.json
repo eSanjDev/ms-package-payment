@@ -14,8 +14,10 @@
         "ext-json": "*",
         "esanj/auth-bridge": ">=0.2.0 <0.3.0",
         "illuminate/support": "^12.0|^13.0",
+        "illuminate/http": "^12.0|^13.0",
         "illuminate/log": "^12.0|^13.0",
-        "guzzlehttp/guzzle": "^7.0"
+        "guzzlehttp/guzzle": "^7.0",
+        "psr/log": "^2.0|^3.0"
     },
     "require-dev": {
         "orchestra/testbench": "^9.0|^10.0",
