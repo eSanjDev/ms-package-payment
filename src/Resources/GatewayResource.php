@@ -29,7 +29,7 @@ final class GatewayResource
             title:          $item['title'] ?? null,
             type:           $item['type'] ?? null,
             connectionType: $item['connection_type'] ?? null,
-            currencies:     $item['currencies'] ?? [],
+            currencies:     (array) ($item['currencies'] ?? []),
             isActive:       (bool) ($item['is_active'] ?? false),
             isSandbox:      (bool) ($item['is_sandbox'] ?? false),
         );

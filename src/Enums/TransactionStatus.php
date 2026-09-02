@@ -18,7 +18,9 @@ enum TransactionStatus: string
 
     public static function fromResponse(mixed $value): self
     {
-        return self::tryFrom((string)$value)
+        $value = is_scalar($value) ? (string)$value : '';
+
+        return self::tryFrom($value)
             ?? throw new PaymentException("Unknown transaction status returned by the payment service: '{$value}'.");
     }
 
