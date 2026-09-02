@@ -4,9 +4,6 @@ namespace Esanj\PaymentClient\Resources;
 
 use Esanj\PaymentClient\Enums\TransactionStatus;
 
-/**
- * Result of POST /api/v1/payment/status.
- */
 final class TransactionStatusResource
 {
     public function __construct(
@@ -26,7 +23,7 @@ final class TransactionStatusResource
             amount:   $item['amount'] ?? 0,
             currency: $item['currency'] ?? '',
             gateway:  $item['gateway'] ?? null,
-            status:   TransactionStatus::from($item['status']),
+            status:   TransactionStatus::fromResponse($item['status'] ?? null),
         );
     }
 }

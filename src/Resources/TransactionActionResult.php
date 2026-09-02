@@ -27,7 +27,7 @@ final class TransactionActionResult
             code:     $data['code'] ?? '',
             amount:   $data['amount'] ?? 0,
             currency: $data['currency'] ?? '',
-            status:   TransactionStatus::from($data['status']),
+            status:   TransactionStatus::fromResponse($data['status'] ?? null),
         );
     }
 }

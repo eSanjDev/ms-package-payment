@@ -2,9 +2,8 @@
 
 namespace Esanj\PaymentClient\Enums;
 
-/**
- * Mirrors the transaction states of the Esanj Payment service.
- */
+use Esanj\PaymentClient\Exceptions\PaymentException;
+
 enum TransactionStatus: string
 {
     case Created = 'created';
@@ -17,9 +16,12 @@ enum TransactionStatus: string
     case Canceled = 'canceled';
     case Failed = 'failed';
 
-    /**
-     * The customer has paid but the merchant has not verified yet.
-     */
+    public static function fromResponse(mixed $value): self
+    {
+        return self::tryFrom((string)$value)
+            ?? throw new PaymentException("Unknown transaction status returned by the payment service: '{$value}'.");
+    }
+
     public function isPaid(): bool
     {
         return $this === self::Paid;
@@ -55,9 +57,6 @@ enum TransactionStatus: string
         return $this === self::Failed;
     }
 
-    /**
-     * No further action can move the transaction forward.
-     */
     public function isFinal(): bool
     {
         return in_array($this, [self::Settled, self::Reverted, self::Refund, self::Canceled, self::Failed], true);
