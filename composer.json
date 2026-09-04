@@ -12,7 +12,7 @@
     "require": {
         "php": "^8.2|^8.3|^8.4",
         "ext-json": "*",
-        "esanj/auth-bridge": ">=0.2.0 <0.3.0",
+        "esanj/auth-bridge": ">=1.0.0 <2.0.0",
         "illuminate/support": "^12.0|^13.0",
         "illuminate/http": "^12.0|^13.0",
         "illuminate/log": "^12.0|^13.0",
