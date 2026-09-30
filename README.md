@@ -5,8 +5,27 @@ A Laravel client package for the **Esanj Payment Microservice**. It authenticate
 ## Installation
 
 ```bash
-composer update esanj/payment-client
+# First installation
+composer require esanj/payment-client
+
+# Existing applications: resolve the corrected dependency metadata as well.
+composer clear-cache
+composer update esanj/payment-client esanj/auth-bridge firebase/php-jwt --with-all-dependencies
 ```
+
+The corrected `auth-bridge` release is still tagged `1.0.0` (tested reference:
+`6453f598583669c0f8d2c9cf6081aa2785b5582a`). This client also requires
+`firebase/php-jwt ^7.0`: the old auth-bridge manifest requiring JWT `^6.0`
+cannot satisfy that constraint. There is no dependency on an unpublished `1.0.1`.
+The corrected bridge stores token arrays and reconstructs `TokenData`, including
+when `cache.serializable_classes=false` with the file cache.
+
+Check `composer show esanj/auth-bridge` and the reference in `composer.lock` after
+updating. A consumer with a stale lock/cache needs to resolve and reinstall the
+corrected dependency; publishing this client alone does not update existing apps.
+Run `composer audit` in the consumer environment with registry access. Do not disable
+security blocking to install the old JWT dependency.
+
 
 The service provider and the `Payment` facade are auto-discovered.
 
@@ -70,10 +89,11 @@ use Esanj\PaymentClient\Facades\Payment;
 use Esanj\PaymentClient\DTOs\InitTransactionData;
 use Esanj\PaymentClient\DTOs\CartData;
 use Esanj\PaymentClient\DTOs\CartItemData;
+use Illuminate\Support\Facades\DB;
 
-$result = Payment::initTransaction(new InitTransactionData(
-    amount: 9_500_000,
-    currency: 'IRR',
+$data = new InitTransactionData(
+    amount: (float) $order->expected_amount, // authorized, server-priced order
+    currency: $order->expected_currency,
     gatewayKey: 'zibal-1',            // null → merchant default gateway (with failover)
     mobile: '09121234567',
     email: 'buyer@example.com',
@@ -89,10 +109,22 @@ $result = Payment::initTransaction(new InitTransactionData(
             totalAmount: 9_000_000,
         ),
     ],
-));
+);
+$result = Payment::initTransaction($data);
 
-// Redirect the customer to the gateway:
-return redirect()->away($result->paymentPageUrl);   // $result->paymentToken holds the code
+// $order is an authorized, server-priced row from your application's order table.
+// Adapt the order fields described in the guide to your application tables.
+// Save the code BEFORE exposing the redirect. Never overwrite another active payment code.
+$bound = DB::table('payment_orders')
+    ->where('id', $order->id)
+    ->whereNull('payment_code')
+    ->whereNull('paid_at')
+    ->where('expected_amount', $data->amount)
+    ->where('expected_currency', $data->currency)
+    ->update(['payment_code' => $result->paymentToken]);
+abort_unless($bound === 1, 409, 'Checkout changed; reconcile this payment before retrying.');
+
+return redirect()->away($result->paymentPageUrl);
 ```
 
 ### Inspect & manage a transaction
@@ -108,21 +140,70 @@ Payment::cancel($code);   // created  → canceled  |  settled → reverted (ref
 ```
 
 A transaction that is `pending` (the customer is at the gateway) can be neither canceled nor
-reverted — wait for the callback. Note that `cancel()` on a settled transaction refunds it and
-returns `status = reverted`, not `canceled`.
+reverted. Poll status as well as handling the callback. `cancel()` on a settled transaction
+requests a refund: its response can be `reverted` or `refund` after provider success.
 
 ### Handle the return from the gateway
 
-The service sends the customer back to your `return_url` with `?status=<status>&code=<uuid>`.
-Both values pass through the customer's browser, so read them as a hint and confirm with the service:
+The service redirects to `return_url` with `?status=<status>&code=<uuid>`.
+Treat browser values as untrusted. Persist the payment token as shown above, then use
+the [confirmation helper in the guide](docs/GUIDE.md#complete-confirmation-helper) in your app:
 
 ```php
+use App\Payments\ConfirmOrderPayment; // implement the confirmation helper shown in the guide
+use Esanj\PaymentClient\Contracts\PaymentClientInterface;
 use Esanj\PaymentClient\Resources\PaymentCallback;
+use Illuminate\Support\Facades\DB;
 
-$callback = PaymentCallback::fromRequest($request);   // ->code, ->status (nullable)
+$request->validate(['code' => ['required', 'string', 'max:255']]);
+$callback = PaymentCallback::fromRequest($request);
+$handler = new ConfirmOrderPayment(app(PaymentClientInterface::class), DB::connection());
 
-$status = Payment::status($callback->code)->status;   // the authoritative state
+// The helper selects the order by its persisted payment_code, checks code/amount/currency,
+// verifies with the service, then locks the order and records one fulfilment intent.
+$orderId = $handler->confirm($callback->code);
+
+return response()->json(['payment' => $orderId === null ? 'pending' : 'confirmed']);
 ```
+
+Do not pass an order id from the session or callback into this flow. The stored payment
+code selects the order. The helper compares the response code, amount and currency with
+that order's immutable expected values, both before verification and before committing.
+Amounts from `status()` and action results are in the originally requested currency;
+do not convert them again using the gateway's current configuration.
+
+`paid_at` and a fulfilment outbox row are saved in one database transaction with a row
+lock and a unique `order_id`. Repeated/interleaved callbacks therefore create one
+fulfilment intent. A durable worker must process that outbox and deduplicate actual
+delivery using the order id; dispatching a job alone is not an exactly-once guarantee.
+Keep payment code, amount and currency immutable during an active checkout. Authorize
+access to any order details separately; the public callback does not grant access.
+
+If verify times out, returns 5xx or loses a race with another callback (400), the helper
+reads `status()` again. Only authoritative `verified` or `settled`, with the same order
+binding and amount/currency, can confirm delivery. `paid`/`pending` remains pending;
+poll again later. Network failures, 409, unknown codes and mismatches never authorize
+delivery. Route them to your application's retry/reconciliation or error handling.
+
+### Verification deadline and missed callbacks
+
+Verify within **20 minutes of the service's `paid_at`**. The scheduled sweep reverts
+payments left in `paid` beyond that window and requests a refund. A recovered missing
+callback starts the window when the pending sweep first confirms payment, not at creation.
+The status endpoint currently does not expose `paid_at`; do not invent a client deadline
+from the order's creation timestamp. Verify immediately whenever polling observes `paid`.
+
+Run a scheduled reconciliation job for locally open payment codes, using the same
+confirmation helper as the browser callback. Poll well inside the 20-minute window
+with bounded retries/backoff and merchant rate limits. Do not depend on the buyer
+returning to your site. After a verify timeout, an authoritative `verified`/`settled`
+state allows safe recovery; a terminal refund/cancel/failure state does not.
+
+Automatic refunds depend on gateway support and provider success; manual gateways
+need operator settlement. `reverted` means refund requested, while `refund` means it
+completed. Follow `status()` for the final outcome, including after `revert()`/`cancel()`.
+For historical transactions with unresolved settlement currency the service returns
+409; stop fulfilment and ask the service operator to reconcile the historical data.
 
 ## Error Handling
 
@@ -142,6 +223,7 @@ try {
 } catch (PaymentApiException $e) {
     if ($e->isInvalidStatus())      { /* transaction not in a verifiable state */ }
     elseif ($e->isForbidden())      { /* unknown code, or it belongs to another merchant */ }
+    elseif ($e->isConflict())      { /* historical currency may need operator reconciliation */ }
     elseif ($e->isRateLimited())    { /* back off for $e->retryAfter seconds */ }
     elseif ($e->isValidationError()){ $errors = $e->getErrors(); }
     else                            { report($e); }
@@ -155,7 +237,10 @@ the branch to handle it.
 
 A rejected token (401) is invalidated and re-fetched before a retry. Server (5xx) and connection
 failures are retried only for idempotent calls (`listGateways()`, `status()`); the actions that
-create or move money are sent once, so a timeout never turns into a duplicate transaction.
+create or move money are not automatically retried after those failures. A 401 can trigger
+a new attempt with a fresh token. After an ambiguous timeout, reconcile status before
+resending. An initialization timeout may leave an unknown transaction on the service;
+do not blindly create another checkout.
 
 ## API surface
 
