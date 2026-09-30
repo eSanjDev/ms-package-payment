@@ -49,6 +49,11 @@ class PaymentApiException extends PaymentException
         return $this->statusCode === 422;
     }
 
+    public function isConflict(): bool
+    {
+        return $this->statusCode === 409;
+    }
+
     public function isRateLimited(): bool
     {
         return $this->statusCode === 429;

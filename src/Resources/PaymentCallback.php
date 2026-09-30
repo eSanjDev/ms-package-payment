@@ -3,6 +3,7 @@
 namespace Esanj\PaymentClient\Resources;
 
 use Esanj\PaymentClient\Enums\TransactionStatus;
+use Esanj\PaymentClient\Exceptions\PaymentException;
 use Illuminate\Http\Request;
 
 final class PaymentCallback
@@ -14,9 +15,15 @@ final class PaymentCallback
 
     public static function fromRequest(Request $request): self
     {
+        $code = $request->query('code', '');
+        $status = $request->query('status', '');
+        if (! is_string($code) || trim($code) === '') {
+            throw new PaymentException('The payment callback must contain a transaction code.');
+        }
+
         return new self(
-            code:   (string) $request->query('code', ''),
-            status: TransactionStatus::tryFrom((string) $request->query('status', '')),
+            code: $code,
+            status: is_string($status) ? TransactionStatus::tryFrom($status) : null,
         );
     }
 }
